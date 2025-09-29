@@ -1,8 +1,7 @@
 # 🛡️ blockips: An IP Blocking CLI Tool
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-Linux-green.svg)
-![Shell](https://img.shields.io/badge/shell-bash-orange.svg)
 
 A powerful, cumulative IP blocking tool for Linux systems that provides **dual-layer protection** using both iptables (system-level) and Apache .htaccess (web server-level) blocking.
 
@@ -97,7 +96,7 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Future Enhancements
 
