@@ -1,0 +1,266 @@
+#!/bin/bash
+
+# blockips - Cumulative IP blocking script
+# Usage: blockips <ip1> <ip2> <ip3> ...
+
+BLOCKED_IPS_FILE="/var/lib/blockips/blocked_ips.txt"
+IPTABLES_CHAIN="BLOCKIPS_INPUT"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    local color=$1
+    local message=$2
+    echo -e "${color}${message}${NC}"
+}
+
+# Function to validate IP address
+validate_ip() {
+    local ip=$1
+    if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        IFS='.' read -ra ADDR <<< "$ip"
+        for i in "${ADDR[@]}"; do
+            if [[ $i -gt 255 ]]; then
+                return 1
+            fi
+        done
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check if script is run as root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        print_status $RED "Error: This script must be run as root (use sudo)"
+        exit 1
+    fi
+}
+
+# Function to setup directories and files
+setup_environment() {
+    mkdir -p "$(dirname "$BLOCKED_IPS_FILE")"
+    touch "$BLOCKED_IPS_FILE"
+    
+    # Create custom iptables chain if it doesn't exist
+    if ! iptables -L "$IPTABLES_CHAIN" >/dev/null 2>&1; then
+        print_status $YELLOW "Creating iptables chain: $IPTABLES_CHAIN"
+        iptables -N "$IPTABLES_CHAIN"
+        iptables -I INPUT 1 -j "$IPTABLES_CHAIN"
+    fi
+}
+
+# Function to add IP to iptables
+block_ip_iptables() {
+    local ip=$1
+    
+    # Check if IP is already blocked in iptables
+    if iptables -C "$IPTABLES_CHAIN" -s "$ip" -j DROP >/dev/null 2>&1; then
+        print_status $YELLOW "IP $ip is already blocked in iptables"
+        return 0
+    fi
+    
+    # Add iptables rule to block the IP
+    if iptables -A "$IPTABLES_CHAIN" -s "$ip" -j DROP; then
+        print_status $GREEN "✓ Blocked $ip in iptables"
+        return 0
+    else
+        print_status $RED "✗ Failed to block $ip in iptables"
+        return 1
+    fi
+}
+
+# Function to add IP to Apache .htaccess (optional)
+block_ip_apache() {
+    local ip=$1
+    local htaccess_file="/var/www/html/.htaccess"
+    
+    # Only proceed if Apache document root exists
+    if [[ -d "/var/www/html" ]]; then
+        # Create .htaccess if it doesn't exist
+        if [[ ! -f "$htaccess_file" ]]; then
+            echo "# IP Blocking Rules" > "$htaccess_file"
+        fi
+        
+        # Check if IP is already blocked in .htaccess
+        if grep -q "Deny from $ip" "$htaccess_file" 2>/dev/null; then
+            return 0
+        fi
+        
+        # Add Apache blocking rule
+        echo "Deny from $ip" >> "$htaccess_file"
+        print_status $GREEN "✓ Added $ip to Apache .htaccess"
+    fi
+}
+
+# Function to show usage
+show_usage() {
+    echo "Usage: $0 <ip1> [ip2] [ip3] ..."
+    echo "       $0 --list        (show all blocked IPs)"
+    echo "       $0 --unblock <ip> (unblock specific IP)"
+    echo "       $0 --clear       (remove all blocks)"
+    echo "       $0 --help        (show this help)"
+    echo ""
+    echo "Examples:"
+    echo "  $0 192.168.1.100 10.0.0.5"
+    echo "  $0 --list"
+    echo "  $0 --unblock 192.168.1.100"
+}
+
+# Function to list blocked IPs
+list_blocked_ips() {
+    if [[ -s "$BLOCKED_IPS_FILE" ]]; then
+        print_status $GREEN "Currently blocked IPs:"
+        cat "$BLOCKED_IPS_FILE" | sort -V | nl
+    else
+        print_status $YELLOW "No IPs are currently blocked"
+    fi
+}
+
+# Function to unblock an IP
+unblock_ip() {
+    local ip=$1
+    
+    if ! validate_ip "$ip"; then
+        print_status $RED "Error: Invalid IP address format: $ip"
+        return 1
+    fi
+    
+    # Remove from iptables
+    if iptables -D "$IPTABLES_CHAIN" -s "$ip" -j DROP >/dev/null 2>&1; then
+        print_status $GREEN "✓ Unblocked $ip from iptables"
+    fi
+    
+    # Remove from file
+    if grep -q "^$ip$" "$BLOCKED_IPS_FILE"; then
+        grep -v "^$ip$" "$BLOCKED_IPS_FILE" > "${BLOCKED_IPS_FILE}.tmp"
+        mv "${BLOCKED_IPS_FILE}.tmp" "$BLOCKED_IPS_FILE"
+        print_status $GREEN "✓ Removed $ip from blocked list"
+    fi
+    
+    # Remove from Apache .htaccess
+    local htaccess_file="/var/www/html/.htaccess"
+    if [[ -f "$htaccess_file" ]] && grep -q "Deny from $ip" "$htaccess_file"; then
+        sed -i "/Deny from $ip/d" "$htaccess_file"
+        print_status $GREEN "✓ Removed $ip from Apache .htaccess"
+    fi
+}
+
+# Function to clear all blocks
+clear_all_blocks() {
+    read -p "Are you sure you want to remove ALL IP blocks? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        # Clear iptables chain
+        if iptables -F "$IPTABLES_CHAIN" >/dev/null 2>&1; then
+            print_status $GREEN "✓ Cleared all iptables blocks"
+        fi
+        
+        # Clear file
+        > "$BLOCKED_IPS_FILE"
+        print_status $GREEN "✓ Cleared blocked IPs file"
+        
+        # Clear Apache .htaccess
+        local htaccess_file="/var/www/html/.htaccess"
+        if [[ -f "$htaccess_file" ]]; then
+            sed -i '/Deny from /d' "$htaccess_file"
+            print_status $GREEN "✓ Cleared Apache .htaccess rules"
+        fi
+        
+        print_status $GREEN "All IP blocks have been cleared"
+    else
+        print_status $YELLOW "Operation cancelled"
+    fi
+}
+
+# Main execution
+main() {
+    check_root
+    setup_environment
+    
+    # Handle special arguments
+    case "$1" in
+        --help|-h)
+            show_usage
+            exit 0
+            ;;
+        --list|-l)
+            list_blocked_ips
+            exit 0
+            ;;
+        --clear)
+            clear_all_blocks
+            exit 0
+            ;;
+        --unblock)
+            if [[ -z "$2" ]]; then
+                print_status $RED "Error: Please specify an IP address to unblock"
+                show_usage
+                exit 1
+            fi
+            unblock_ip "$2"
+            exit 0
+            ;;
+        "")
+            print_status $RED "Error: No IP addresses provided"
+            show_usage
+            exit 1
+            ;;
+    esac
+    
+    # Process IP addresses
+    new_ips_count=0
+    duplicate_ips_count=0
+    invalid_ips_count=0
+    
+    for ip in "$@"; do
+        # Validate IP format
+        if ! validate_ip "$ip"; then
+            print_status $RED "✗ Invalid IP address format: $ip"
+            ((invalid_ips_count++))
+            continue
+        fi
+        
+        # Check if IP is already in our blocked list
+        if grep -q "^$ip$" "$BLOCKED_IPS_FILE"; then
+            print_status $YELLOW "IP $ip is already in blocked list"
+            ((duplicate_ips_count++))
+            continue
+        fi
+        
+        # Block the IP
+        if block_ip_iptables "$ip"; then
+            # Add to persistent file
+            echo "$ip" >> "$BLOCKED_IPS_FILE"
+            
+            # Also block in Apache (optional)
+            block_ip_apache "$ip"
+            
+            ((new_ips_count++))
+        fi
+    done
+    
+    # Summary
+    echo ""
+    print_status $GREEN "=== SUMMARY ==="
+    echo "New IPs blocked: $new_ips_count"
+    echo "Duplicate IPs (already blocked): $duplicate_ips_count"
+    echo "Invalid IPs: $invalid_ips_count"
+    
+    if [[ $new_ips_count -gt 0 ]]; then
+        echo ""
+        print_status $GREEN "Total blocked IPs: $(wc -l < "$BLOCKED_IPS_FILE")"
+        echo ""
+        print_status $YELLOW "Use '$0 --list' to see all blocked IPs"
+        print_status $YELLOW "Use '$0 --unblock <ip>' to remove a specific IP"
+    fi
+}
+
+# Run main function with all arguments
+main "$@"
